@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Import De-stuffing Report Generator | SSMS</title>
+    <meta name="description" content="Automated Import De-stuffing Report Generator - Extract data from Consol Manifest PDFs and generate standardized reports.">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        brand: {
+                            50: '#eef2ff',
+                            100: '#e0e7ff',
+                            200: '#c7d2fe',
+                            300: '#a5b4fc',
+                            400: '#818cf8',
+                            500: '#6366f1',
+                            600: '#4f46e5',
+                            700: '#4338ca',
+                            800: '#3730a3',
+                            900: '#312e81',
+                        },
+                        surface: {
+                            50: '#f8fafc',
+                            100: '#f1f5f9',
+                            200: '#e2e8f0',
+                            300: '#cbd5e1',
+                            400: '#94a3b8',
+                            500: '#64748b',
+                            600: '#475569',
+                            700: '#334155',
+                            800: '#1e293b',
+                            900: '#0f172a',
+                            950: '#020617',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-surface-950 text-white min-h-screen font-sans">
+    <!-- Background gradient effects -->
+    <div class="fixed inset-0 pointer-events-none overflow-hidden">
+        <div class="absolute -top-40 -right-40 w-96 h-96 bg-brand-600/10 rounded-full blur-3xl"></div>
+        <div class="absolute -bottom-40 -left-40 w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl"></div>
+    </div>
+
+    <div class="relative z-10">
+        <!-- Header -->
+        <header class="border-b border-surface-800/50 backdrop-blur-xl bg-surface-950/80 sticky top-0 z-50">
+            <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-brand-500/25">
+                        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <h1 class="text-lg font-bold bg-gradient-to-r from-white to-surface-300 bg-clip-text text-transparent">De-stuffing Report Generator</h1>
+                        <p class="text-xs text-surface-500">Automated Consol Manifest → Report</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <div id="reportCounter" class="hidden items-center gap-2 px-3 py-1.5 rounded-lg bg-surface-800/50 border border-surface-700/50">
+                        <span class="text-xs text-surface-400">Next Report #</span>
+                        <span id="nextReportNum" class="text-sm font-mono font-semibold text-brand-400"></span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto px-6 py-8">
+            <!-- Upload Section -->
+            <section id="uploadSection" class="mb-8">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <!-- Upload Card -->
+                    <div class="lg:col-span-2">
+                        <div class="rounded-2xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm overflow-hidden">
+                            <div class="px-6 py-4 border-b border-surface-800/50">
+                                <h2 class="text-sm font-semibold text-surface-200 flex items-center gap-2">
+                                    <svg class="w-4 h-4 text-brand-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+                                    </svg>
+                                    Upload Consol Manifest PDF
+                                </h2>
+                            </div>
+                            <div class="p-6">
+                                <div id="dropZone" class="border-2 border-dashed border-surface-700 hover:border-brand-500/50 rounded-xl p-10 text-center transition-all duration-300 cursor-pointer group hover:bg-brand-500/5">
+                                    <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-surface-800 group-hover:bg-brand-500/10 flex items-center justify-center transition-all duration-300">
+                                        <svg class="w-8 h-8 text-surface-500 group-hover:text-brand-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                                        </svg>
+                                    </div>
+                                    <p class="text-surface-300 font-medium mb-1">Drop your manifest PDF here</p>
+                                    <p class="text-surface-500 text-sm">or click to browse files</p>
+                                    <input type="file" id="pdfInput" accept=".pdf" class="hidden">
+                                </div>
+                                <div id="fileInfo" class="hidden mt-4 px-4 py-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                                    <div class="flex items-center gap-3">
+                                        <svg class="w-5 h-5 text-emerald-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                        </svg>
+                                        <span id="fileName" class="text-sm text-emerald-300"></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Settings Card -->
+                    <div class="lg:col-span-1">
+                        <div class="rounded-2xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm overflow-hidden">
+                            <div class="px-6 py-4 border-b border-surface-800/50">
+                                <h2 class="text-sm font-semibold text-surface-200 flex items-center gap-2">
+                                    <svg class="w-4 h-4 text-brand-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                                    </svg>
+                                    Report Settings
+                                </h2>
+                            </div>
+                            <div class="p-6 space-y-4">
+                                <div>
+                                    <label for="currentSequenceInput" class="block text-xs font-medium text-surface-400 mb-1.5">Current Sequence</label>
+                                    <div class="flex items-center rounded-lg bg-surface-800 border border-surface-700 focus-within:ring-2 focus-within:ring-brand-500/50 focus-within:border-brand-500 overflow-hidden transition-all">
+                                        <span class="pl-3 pr-1 text-surface-500 text-sm font-mono border-r border-surface-700/50 bg-surface-800/50">SSMS/</span>
+                                        <input type="number" id="currentSequenceInput" min="1" placeholder="105"
+                                            class="w-full px-2 py-2 bg-transparent text-surface-200 text-sm font-mono outline-none placeholder:text-surface-600">
+                                        <span class="pr-3 pl-1 text-surface-500 text-sm font-mono border-l border-surface-700/50 bg-surface-800/50">/2026</span>
+                                    </div>
+                                    <p class="mt-1 text-xs text-surface-500">Auto-increments on each print</p>
+                                </div>
+                                <div>
+                                    <label for="dateShiftInput" class="block text-xs font-medium text-surface-400 mb-1.5">Date & Shift</label>
+                                    <input type="text" id="dateShiftInput" placeholder="e.g. 15-MAR-2026 / Day"
+                                        class="w-full px-3 py-2 rounded-lg bg-surface-800 border border-surface-700 text-surface-200 text-sm font-sans focus:ring-2 focus:ring-brand-500/50 focus:border-brand-500 transition-all outline-none placeholder:text-surface-600">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-surface-400 mb-1.5 flex justify-between items-center">
+                                        <span>Surveyor Signature</span>
+                                        <button id="clearSignatureBtn" class="text-brand-400 hover:text-brand-300 text-[10px] uppercase font-bold tracking-wider">Clear</button>
+                                    </label>
+                                    <div class="rounded-lg border border-surface-700 bg-surface-800 overflow-hidden">
+                                        <canvas id="signaturePad" width="280" height="100" class="w-full bg-white touch-none cursor-crosshair"></canvas>
+                                    </div>
+                                </div>
+                                <button id="saveSettingsBtn" class="w-full px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-sm font-medium transition-all duration-200 hover:shadow-lg hover:shadow-brand-500/25">
+                                    Save Settings
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Loading Indicator -->
+            <div id="loadingIndicator" class="hidden mb-8">
+                <div class="rounded-2xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm p-8 text-center">
+                    <div class="inline-flex items-center gap-3">
+                        <div class="animate-spin w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full"></div>
+                        <span class="text-surface-300 text-sm">Parsing manifest PDF...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Extracted Data Section -->
+            <section id="dataSection" class="hidden mb-8 space-y-6">
+                <!-- Header Info Cards -->
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div class="rounded-xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm p-4">
+                        <label class="block text-xs font-medium text-surface-500 mb-1">Vessel / Voyage</label>
+                        <input type="text" id="editVessel" class="editable-field w-full bg-transparent text-surface-200 text-sm font-medium outline-none border-b border-transparent focus:border-brand-500 transition-colors pb-0.5">
+                    </div>
+                    <div class="rounded-xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm p-4">
+                        <label class="block text-xs font-medium text-surface-500 mb-1">Report No</label>
+                        <input type="text" id="editReportNo" class="editable-field w-full bg-transparent text-surface-200 text-sm font-medium outline-none border-b border-transparent focus:border-brand-500 transition-colors pb-0.5">
+                    </div>
+                    <div class="rounded-xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm p-4">
+                        <label class="block text-xs font-medium text-surface-500 mb-1">Container No</label>
+                        <input type="text" id="editContainer" class="editable-field w-full bg-transparent text-surface-200 text-sm font-medium outline-none border-b border-transparent focus:border-brand-500 transition-colors pb-0.5">
+                    </div>
+                    <div class="rounded-xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm p-4">
+                        <label class="block text-xs font-medium text-surface-500 mb-1">AUX Code</label>
+                        <input type="text" id="editAuxCode" class="editable-field w-full bg-transparent text-surface-200 text-sm font-medium outline-none border-b border-transparent focus:border-brand-500 transition-colors pb-0.5">
+                    </div>
+                    <div class="rounded-xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm p-4">
+                        <label class="block text-xs font-medium text-surface-500 mb-1">Location</label>
+                        <input type="text" id="editLocation" class="editable-field w-full bg-transparent text-surface-200 text-sm font-medium outline-none border-b border-transparent focus:border-brand-500 transition-colors pb-0.5">
+                    </div>
+                    <div class="rounded-xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm p-4">
+                        <label class="block text-xs font-medium text-surface-500 mb-1">Port of Discharge</label>
+                        <input type="text" id="editPort" value="CHENNAI" class="editable-field w-full bg-transparent text-surface-200 text-sm font-medium outline-none border-b border-transparent focus:border-brand-500 transition-colors pb-0.5">
+                    </div>
+                    <div class="rounded-xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm p-4">
+                        <label class="block text-xs font-medium text-surface-500 mb-1">Seal No</label>
+                        <input type="text" id="editSealNo" class="editable-field w-full bg-transparent text-surface-200 text-sm font-medium outline-none border-b border-transparent focus:border-brand-500 transition-colors pb-0.5">
+                    </div>
+                    <div class="rounded-xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm p-4">
+                        <label class="block text-xs font-medium text-surface-500 mb-1">A/C</label>
+                        <input type="text" id="editAC" class="editable-field w-full bg-transparent text-surface-200 text-sm font-medium outline-none border-b border-transparent focus:border-brand-500 transition-colors pb-0.5">
+                    </div>
+                </div>
+
+                <!-- Data Table -->
+                <div class="rounded-2xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm overflow-hidden">
+                    <div class="px-6 py-4 border-b border-surface-800/50 flex items-center justify-between">
+                        <h2 class="text-sm font-semibold text-surface-200 flex items-center gap-2">
+                            <svg class="w-4 h-4 text-brand-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                            </svg>
+                            Extracted Line Items
+                            <span id="rowCount" class="ml-2 px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 text-xs font-mono"></span>
+                        </h2>
+                        <div class="flex items-center gap-2">
+                            <button id="addRowBtn" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-surface-300 text-xs font-medium transition-all border border-surface-700">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                                Add Row
+                            </button>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-xs" id="dataTable">
+                            <thead>
+                                <tr class="bg-surface-800/50">
+                                    <th class="px-3 py-2.5 text-left font-semibold text-surface-400 uppercase tracking-wider w-12">S.No</th>
+                                    <th class="px-3 py-2.5 text-left font-semibold text-surface-400 uppercase tracking-wider w-20">L.No</th>
+                                    <th class="px-3 py-2.5 text-left font-semibold text-surface-400 uppercase tracking-wider w-24">Marks & No</th>
+                                    <th class="px-3 py-2.5 text-left font-semibold text-surface-400 uppercase tracking-wider w-40">H.B.L No/Date</th>
+                                    <th class="px-3 py-2.5 text-left font-semibold text-surface-400 uppercase tracking-wider">Importer Name</th>
+                                    <th class="px-3 py-2.5 text-left font-semibold text-surface-400 uppercase tracking-wider">Description</th>
+                                    <th class="px-3 py-2.5 text-left font-semibold text-surface-400 uppercase tracking-wider w-16">PKGS</th>
+                                    <th class="px-3 py-2.5 text-left font-semibold text-surface-400 uppercase tracking-wider w-24">Weight</th>
+                                    <th class="px-3 py-2.5 text-left font-semibold text-surface-400 uppercase tracking-wider w-40">Remarks</th>
+                                    <th class="px-3 py-2.5 text-center font-semibold text-surface-400 uppercase tracking-wider w-12">Del</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tableBody">
+                            </tbody>
+                            <tfoot>
+                                <tr class="bg-surface-800/30 border-t border-surface-700/50">
+                                    <td colspan="6" class="px-3 py-2.5 text-right font-semibold text-surface-300 text-xs uppercase tracking-wider">Totals</td>
+                                    <td class="px-3 py-2.5 font-bold text-brand-400 font-mono text-xs" id="totalPkgs">0</td>
+                                    <td class="px-3 py-2.5 font-bold text-brand-400 font-mono text-xs" id="totalWeight">0 KGS</td>
+                                    <td colspan="2"></td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="flex items-center justify-end gap-3">
+                    <button id="resetBtn" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-surface-800 hover:bg-surface-700 text-surface-300 text-sm font-medium transition-all border border-surface-700 hover:border-surface-600">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                        Reset
+                    </button>
+                    <button id="printBtn" class="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white text-sm font-semibold transition-all duration-200 shadow-lg shadow-brand-500/25 hover:shadow-brand-500/40">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
+                        Print Report
+                    </button>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Print Report Template (hidden, used for print) -->
+    <div id="printTemplate" class="print-only">
+        <!-- Populated dynamically by JS -->
+    </div>
+
+    <!-- pdf.js (UMD build, works as classic script) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    </script>
+    <script src="app.js"></script>
+</body>
+</html>
