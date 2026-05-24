@@ -169,11 +169,36 @@ async function handleFile(file) {
 
         var fullText = allPages.map(function (lines) { return lines.join('\n'); }).join('\n===PAGE_BREAK===\n');
 
-        console.log('--- FULL EXTRACTED TEXT ---');
-        console.log(fullText);
-        console.log('--- END EXTRACTED TEXT ---');
-
-        parseManifestText(fullText, allPages);
+        if (fullText.replace(/===PAGE_BREAK===/g, '').trim().length < 50) {
+            document.getElementById('loadingStatus').textContent = 'Scanned PDF detected. Running OCR... This may take a minute.';
+            var ocrText = '';
+            var worker = await Tesseract.createWorker('eng');
+            for (var i = 1; i <= pdf.numPages; i++) {
+                document.getElementById('loadingStatus').textContent = 'Running OCR... Page ' + i + ' of ' + pdf.numPages;
+                var page = await pdf.getPage(i);
+                var viewport = page.getViewport({ scale: 2.0 });
+                var canvas = document.createElement('canvas');
+                var context = canvas.getContext('2d');
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+                await page.render({ canvasContext: context, viewport: viewport }).promise;
+                var ret = await worker.recognize(canvas);
+                ocrText += '\n===PAGE_BREAK===\n' + ret.data.text + '\n';
+            }
+            await worker.terminate();
+            
+            console.log('--- OCR EXTRACTED TEXT ---');
+            console.log(ocrText);
+            console.log('--- END OCR TEXT ---');
+            
+            parseOCRManifestText(ocrText);
+        } else {
+            console.log('--- FULL EXTRACTED TEXT ---');
+            console.log(fullText);
+            console.log('--- END EXTRACTED TEXT ---');
+            
+            parseManifestText(fullText, allPages);
+        }
         renderTable();
         loadingIndicator.classList.add('hidden');
         dataSection.classList.remove('hidden');
@@ -182,6 +207,7 @@ async function handleFile(file) {
         console.error('PDF parsing error:', error);
         alert('Error parsing PDF: ' + error.message);
         loadingIndicator.classList.add('hidden');
+        document.getElementById('loadingStatus').textContent = 'Parsing manifest PDF...';
     }
 }
 
@@ -189,28 +215,43 @@ async function handleFile(file) {
 function parseManifestText(fullText, allPages) {
     var allLines = fullText.split('\n');
 
-    // --- A/C: Company name from the top center header (first line of first page) ---
-    var acName = '';
-    if (allPages.length > 0) {
-        for (var i = 0; i < Math.min(allPages[0].length, 5); i++) {
-            var line = allPages[0][i].trim();
-            if (line.match(/(?:PVT\s*\.?\s*LTD|PRIVATE\s*LIMITED|LIMITED)/i) && !line.match(/importer/i)) {
-                acName = line.replace(/\s+/g, ' ').trim().toUpperCase();
-                break;
-            }
-        }
+    // --- Company Detection ---
+    // CARGO CONSOLIDATORS manifests have "CARGO CONSOLIDATORS" in header, "ECCT CFS" in container rows, or "cargoconsol" email
+    // ALLTRANS manifests have generic "SEA CONSOL IGM PRINT" header with NO company name
+    var isCARGO = fullText.match(/CARGO\s*CONSOLIDATORS/i) || fullText.match(/ECCT/i) || fullText.match(/cargoconsol/i);
+    var companyPrefix = isCARGO ? 'CCIPL' : 'ATSLL';
+    
+    console.log('--- COMPANY DETECTION ---');
+    console.log('Found CARGO CONSOLIDATORS:', !!fullText.match(/CARGO\s*CONSOLIDATORS/i));
+    console.log('Found ECCT:', !!fullText.match(/ECCT/i));
+    console.log('Found cargoconsol:', !!fullText.match(/cargoconsol/i));
+    console.log('Detected company:', isCARGO ? 'CARGO CONSOLIDATORS' : 'ALLTRANS');
+    
+    var reportNum = getNextReportNumber() || '001';
+    extractedData.reportNo = 'SSMS/' + companyPrefix + '/' + reportNum + '/2026';
+    
+    if (isCARGO) {
+        extractedData.location = 'ECCT CFS';
+        extractedData.ac = 'CARGO CONSOLIDATORS INDIA PVT LTD';
+    } else {
+        extractedData.location = 'SATTVA 2 CFS';
+        extractedData.ac = 'ALLTRANS SHIPPING AND LOGISTICS LL';
     }
-    extractedData.ac = acName;
 
     // --- Vessel & Voyage ---
-    // Pattern: "Vessel   : TS SHEKOU  Vessel Code   : TS   Voyage No   : 26002E"
     var vessel = '';
     var voyage = '';
     for (var i = 0; i < allLines.length; i++) {
         var line = allLines[i].trim();
         if (line.indexOf('===PAGE_BREAK===') !== -1) continue;
 
-        // Pattern: "Vessel : XXX ... Voyage No : YYY"
+        var vMatch = line.match(/Voyage\s*No\.?\s*:\s*(\S+)\s*Vessel\s*:\s*(.*)/i);
+        if (vMatch) {
+            voyage = vMatch[1].trim();
+            vessel = vMatch[2].trim();
+            break;
+        }
+
         var m = line.match(/Vessel\s*:\s*([A-Z0-9\s]+?)\s+(?:Vessel\s*Code|Voyage)/i);
         if (m) {
             vessel = m[1].trim();
@@ -223,31 +264,26 @@ function parseManifestText(fullText, allPages) {
     }
     extractedData.vessel = (vessel && voyage) ? (vessel + '/' + voyage) : (vessel || voyage || '');
 
-    // --- Report No ---
-    var reportNum = getNextReportNumber();
-    extractedData.reportNo = reportNum ? ('SSMS/' + reportNum + '/2026') : 'SSMS//2026';
-
-    // --- Container No, Seal No, CFS Code, ISO Code ---
-    // Pattern: "SKHU6452064   LCL   007345   ...   ECCT CFS 45G0   N"
+    // --- Container No, Seal No, ISO Code ---
     var containerNo = '';
     var sealNo = '';
-    var cfsCode = '';
     var isoCode = '';
     for (var i = 0; i < allLines.length; i++) {
         var line = allLines[i].trim();
-        // Container row: starts with container number pattern XXXX1234567, has LCL, seal, etc.
+        
+        var cMatch = line.match(/^\s*([A-Z]{4}\d{7})\s+(?:LCL|FCL)\s+(\S+)\s+\S+\s+[\d\.]+\s+\d+\s+(\d{4})/i);
+        if (cMatch) {
+            containerNo = cMatch[1].toUpperCase();
+            sealNo = cMatch[2];
+            isoCode = cMatch[3];
+            break;
+        }
+
         var containerRowMatch = line.match(/([A-Z]{4}\d{7})\s+LCL\s+(\S+)/i);
         if (containerRowMatch) {
             containerNo = containerRowMatch[1].toUpperCase();
             sealNo = containerRowMatch[2];
 
-            // Extract CFS Code - look for known pattern like "ECCT CFS" or similar
-            var cfsMatch = line.match(/(\S+\s+CFS|CFS\s+\S+)/i);
-            if (cfsMatch) {
-                cfsCode = cfsMatch[1].trim().toUpperCase();
-            }
-
-            // Extract ISO Code - look for 45G0, 22G0, etc.
             var isoMatch = line.match(/\b(45G0|22G0|45G1|22G1|40G0|40G1|20G0|20G1)\b/);
             if (isoMatch) {
                 isoCode = isoMatch[1].toUpperCase();
@@ -257,12 +293,11 @@ function parseManifestText(fullText, allPages) {
     }
     extractedData.containerNo = containerNo;
     extractedData.sealNo = sealNo;
-    extractedData.location = cfsCode;
 
     // --- AUX Code mapping ---
-    if (isoCode === '45G0') {
+    if (isoCode === '4500' || isoCode === '4400' || isoCode === '45G0' || isoCode === '45G1') {
         extractedData.auxCode = '45G1 (40 HC)';
-    } else if (isoCode === '22G0') {
+    } else if (isoCode === '2200' || isoCode === '22G0' || isoCode === '22G1') {
         extractedData.auxCode = '22G1 (20GP)';
     } else if (isoCode) {
         extractedData.auxCode = isoCode;
@@ -306,18 +341,22 @@ function extractSublineData(allLines) {
         }
 
         // --- Detect Subline entry ---
-        // Pattern: "Subline No : 1   HBL Number : SNKO020260311423   HBL Date : 15-MAR-26"
-        // Or:      "Subline No   : 1   HBL Number   : SNKO020260311423   HBL Date : 15-MAR-26"
-        var sublineMatch = line.match(/Sub\s*line\s*No\s*:\s*(\d+)\s+HBL\s*Number\s*:\s*(\S+)\s+HBL\s*Date\s*:\s*(\S+)/i);
+        var sublineMatch = line.match(/Sub\s*line\s*No\.?\s*:\s*(\d+)\s+HBL\s*Number\s*:\s*(\S+)\s+HBL\s*Date\s*:\s*(\S+)/i);
         if (sublineMatch) {
             // Flush previous entry
             if (currentEntry) {
                 flushEntry(currentEntry, importerBuf, commodityBuf);
                 entries.push(currentEntry);
             }
+            
+            var sNo = sublineMatch[1].replace(/"/g, '1').replace(/'/g, '1');
+            if (line.match(/Sub\s*line\s*No\.?\s*:\s*\d+["']/i)) {
+                sNo = sNo + '1';
+            }
+
             currentEntry = {
                 lineNo: '',
-                sublineNo: sublineMatch[1],
+                sublineNo: sNo,
                 hblNumber: sublineMatch[2],
                 hblDate: sublineMatch[3],
                 importerName: '',
@@ -333,15 +372,21 @@ function extractSublineData(allLines) {
         }
 
         // Also handle "Subline No : X" without HBL on same line (fallback)
-        var sublineOnly = line.match(/Sub\s*line\s*No\s*:\s*(\d+)/i);
+        var sublineOnly = line.match(/Sub\s*line\s*No\.?\s*:\s*(\d+)/i);
         if (sublineOnly && !sublineMatch) {
             if (currentEntry) {
                 flushEntry(currentEntry, importerBuf, commodityBuf);
                 entries.push(currentEntry);
             }
+            
+            var sNo = sublineOnly[1].replace(/"/g, '1').replace(/'/g, '1');
+            if (line.match(/Sub\s*line\s*No\.?\s*:\s*\d+["']/i)) {
+                sNo = sNo + '1';
+            }
+
             currentEntry = {
                 lineNo: '',
-                sublineNo: sublineOnly[1],
+                sublineNo: sNo,
                 hblNumber: '',
                 hblDate: '',
                 importerName: '',
@@ -363,13 +408,9 @@ function extractSublineData(allLines) {
         }
 
         if (!currentEntry) {
-            // Extract Line No from pre-subline context
-            // Pattern: "Line No   : 320   BL Number   : ..."
-            var lineNoMatch = line.match(/Line\s*No\s*:\s*(\d+)/i);
+            var lineNoMatch = line.match(/Line\s*No\.?\s*:\s*(\d+)/i);
             if (lineNoMatch) {
-                // Store for next subline
                 currentEntry = null; // will be set when subline found
-                // We'll back-patch the line number
             }
             continue;
         }
@@ -377,7 +418,7 @@ function extractSublineData(allLines) {
         // --- If collecting commodity description ---
         if (collectingCommodity) {
             // Stop on known field headers
-            if (line.match(/^(Marks\s*Number|Importer|Consignee|Container\s*No|Ref:|Page\s+\d|Line\s*No|Sub\s*line|Total\s*Package|Gross\s*Weight|Item\s*Type|Nature|Dest\s*Code)/i)) {
+            if (line.match(/^(Marks|Importer|Consignee|Container|Ref:|Page\s+\d|Line\s*No|Sub\s*line|Total\s*Package|Gross\s*Weight|Item\s*Type|Nature|Dest\s*Code|Goods\s*Desc)/i)) {
                 collectingCommodity = false;
                 // fall through to parse this line
             } else {
@@ -389,7 +430,7 @@ function extractSublineData(allLines) {
         // --- If collecting importer address lines ---
         if (collectingImporter) {
             // Stop on known field headers
-            if (line.match(/^(Container\s*No|Ref:|Page\s+\d|Line\s*No|Sub\s*line|Commodity|HBL|Total\s*Package|Gross\s*Weight|Item\s*Type|Nature|Dest\s*Code|Mode\s*of|Port\s*of|Bond|Marks\s*Number)/i)) {
+            if (line.match(/^(Container|Ref:|Page\s+\d|Line\s*No|Sub\s*line|Commodity|Goods\s*Desc|HBL|Total\s*Package|Gross\s*Weight|Item\s*Type|Nature|Dest\s*Code|Mode\s*of|Port\s*of|Bond|Marks)/i)) {
                 collectingImporter = false;
                 // fall through
             } else {
@@ -398,9 +439,8 @@ function extractSublineData(allLines) {
             }
         }
 
-        // --- Line No is handled by backfillLineNumbers ---
         // Skip "Line No" lines to avoid false matches
-        if (line.match(/^Line\s*No\s*:/i)) {
+        if (line.match(/^Line\s*No\.?\s*:/i)) {
             continue;
         }
 
@@ -415,14 +455,13 @@ function extractSublineData(allLines) {
         }
 
         // --- Total Packages ---
-        // Pattern: "Total Packages   : 3   Gross Weight   : 2000.000"
         var pkgMatch = line.match(/Total\s*Package[s]?\s*:\s*(\d+)/i);
         if (pkgMatch) {
             currentEntry.totalPackages = pkgMatch[1];
         }
 
         // --- Marks Number ---
-        var marksMatch = line.match(/Marks\s*Number\s*:\s*(.*)/i);
+        var marksMatch = line.match(/Marks\s*(?:Number)?\s*:\s*(.*)/i);
         if (marksMatch) {
             currentEntry.marks = marksMatch[1].trim();
             continue;
@@ -433,12 +472,11 @@ function extractSublineData(allLines) {
         if (weightMatch) {
             var w = weightMatch[1].replace(/,/g, '');
             currentEntry.grossWeight = parseFloat(w).toFixed(3);
-            continue; // The rest of this line usually has "Unit : KGS"
+            continue;
         }
 
         // --- Commodity Description ---
-        // Pattern: "Commodity Desc   : GEAR BOX AS PER BL"
-        var commodityMatch = line.match(/Commodity\s*Desc\s*:?\s*(.*)/i);
+        var commodityMatch = line.match(/(?:Commodity|Goods)\s*Desc\s*:?\s*(.*)/i);
         if (commodityMatch) {
             var descText = commodityMatch[1].trim();
             if (descText) commodityBuf.push(descText);
@@ -447,7 +485,6 @@ function extractSublineData(allLines) {
         }
 
         // --- Importer's Name & Address ---
-        // Pattern: "Importer's Name & Address   Consignee's Name & Address"
         if (line.match(/Importer/i) && line.match(/Address/i)) {
             collectingImporter = true;
             importerBuf = [];
@@ -461,8 +498,7 @@ function extractSublineData(allLines) {
         entries.push(currentEntry);
     }
 
-    // Backfill Line Numbers: scan all entries, if lineNo blank, look back in text
-    // Actually, let's scan the text for "Line No : XXX" that appears before subline entries
+    // Backfill Line Numbers
     backfillLineNumbers(entries, allLines);
 
     // Build output rows
@@ -477,13 +513,21 @@ function extractSublineData(allLines) {
 
         var weightVal = parseFloat(entry.grossWeight) || 0;
 
+        var marks = entry.marks || '';
+        marks = marks.replace(/\bAS\s+PER\s+BL\b/gi, '').trim();
+        marks = marks.replace(/\bC\/(?:NO|O)\.?\s*\d+\b/gi, '').trim();
+
+        var desc = entry.commodityDesc || '';
+        desc = desc.replace(/\bAS\s+PER\s+BL\b/gi, '').trim();
+        desc = desc.replace(/\bHS\s*CODE\b.*$/gi, '').trim();
+
         return {
             sno: index + 1,
             lno: lno,
-            marks: entry.marks || '',
+            marks: marks,
             hbl: hbl,
             importerName: entry.importerName || '',
-            description: entry.commodityDesc || '',
+            description: desc,
             pkgs: entry.totalPackages || '',
             weight: weightVal.toFixed(3),
             remarks: 'APPARENT SOUND CONDITIONS'
@@ -495,32 +539,21 @@ function flushEntry(entry, importerBuf, commodityBuf) {
     // --- Finalize commodity description ---
     if (commodityBuf.length > 0) {
         var desc = commodityBuf.join(' ').replace(/\s+/g, ' ').trim().toUpperCase();
-        // Remove "AS PER BL"
         desc = desc.replace(/\bAS\s+PER\s+BL\b/gi, '').trim();
         entry.commodityDesc = desc;
     }
 
     // --- Finalize importer name ---
     if (importerBuf.length > 0) {
-        // The importer lines contain both importer and consignee side by side.
-        // First line after "Importer's Name & Address ..." is the company name (may be duplicated for consignee).
-        // We need just the LEFT half (importer) not the right half (consignee).
-
-        // Strategy: The first importer line usually has the company name repeated.
-        // e.g. "ROTORK CONTROLS INDIA PVT LTD   ROTORK CONTROLS INDIA PVT LTD"
-        // Get just the first half by finding the midpoint duplication.
-
-        var firstLine = importerBuf[0].trim().toUpperCase();
-
-        // Try to find duplicated company name
-        var companyName = extractLeftHalf(firstLine);
-
-        // Build full address from remaining lines (left half only)
         var addressParts = [];
+        var companyName = extractLeftHalf(importerBuf[0].trim().toUpperCase());
         for (var k = 1; k < importerBuf.length; k++) {
             var leftHalf = extractLeftHalf(importerBuf[k].trim().toUpperCase());
+            leftHalf = leftHalf.replace(/\|\s*P\s*LTD/g, 'PVT LTD').replace(/\|\s*PVT\s*LTD/g, 'PVT LTD').replace(/\|\s*/g, '');
             if (leftHalf) addressParts.push(leftHalf);
         }
+
+        companyName = companyName.replace(/\|\s*P\s*LTD/g, 'PVT LTD').replace(/\|\s*PVT\s*LTD/g, 'PVT LTD').replace(/\|\s*/g, '');
 
         var fullAddress = addressParts.join(' ');
 
@@ -536,17 +569,12 @@ function flushEntry(entry, importerBuf, commodityBuf) {
 }
 
 function extractLeftHalf(line) {
-    // Attempt to split the line in half (importer | consignee are side by side)
-    // Strategy 1: If the line contains the same text repeated, take the first occurrence
     var half = Math.floor(line.length / 2);
 
-    // Check if left half and right half are similar (within some tolerance)
     var left = line.substring(0, half).trim();
     var right = line.substring(half).trim();
 
-    // If they're very similar (>60% overlap), just use the left half
     if (left.length > 5 && right.length > 5) {
-        // Simple check: does the right half start similarly to the left?
         var leftWords = left.split(/\s+/);
         var rightWords = right.split(/\s+/);
 
@@ -561,47 +589,42 @@ function extractLeftHalf(line) {
         }
     }
 
-    // Strategy 2: Look for large gaps (multiple spaces) to split
     var gapMatch = line.match(/^(.+?)\s{3,}(.+)$/);
     if (gapMatch) {
         return gapMatch[1].trim();
     }
 
-    // Fallback: return full line
     return line;
 }
 
 function extractCity(addressText) {
+    var text = addressText.toUpperCase();
+    
+    var matches = text.match(/\b([A-Z]+\s+DISTRICT|[A-Z]+\s+DIST|TAMIL\s*NADU|TN|KANCHEEPURAM|KANCHIPURAM|THIRUVALLUR|SRIPERUMBUDUR|SRIPERUMBUDU|CHENNAI|BANGALORE|HYDERABAD|MUMBAI|PUNE)\b/);
+    
+    if (matches) {
+        var match = matches[1].trim();
+        if (match === 'TN') return 'TAMIL NADU';
+        if (match === 'SRIPERUMBUDU') return 'SRIPERUMBUDUR';
+        return match;
+    }
+    
     var cities = [
-        'MUMBAI', 'DELHI', 'NEW DELHI', 'CHENNAI', 'BANGALORE', 'BENGALURU',
-        'KOLKATA', 'HYDERABAD', 'PUNE', 'AHMEDABAD', 'SURAT', 'JAIPUR',
-        'LUCKNOW', 'KANPUR', 'NAGPUR', 'VISAKHAPATNAM', 'INDORE', 'THANE',
-        'BHOPAL', 'PATNA', 'VADODARA', 'GHAZIABAD', 'LUDHIANA', 'AGRA',
-        'NASHIK', 'COIMBATORE', 'MADURAI', 'VARANASI', 'MEERUT', 'FARIDABAD',
-        'RAJKOT', 'NOIDA', 'GURGAON', 'GURUGRAM', 'KOCHI', 'COCHIN',
-        'THIRUVANANTHAPURAM', 'TRIVANDRUM', 'MANGALORE', 'MANGALURU',
-        'MYSORE', 'MYSURU', 'SALEM', 'TIRUPUR', 'TIRUPPUR', 'HOSUR',
-        'ERODE', 'VELLORE', 'TUTICORIN', 'THOOTHUKUDI', 'PONDICHERRY',
-        'PUDUCHERRY', 'NAVI MUMBAI', 'BARODA', 'CHANDIGARH', 'JAMSHEDPUR',
-        'RANCHI', 'RAIPUR', 'BHUBANESWAR', 'GUWAHATI', 'DEHRADUN',
-        'JODHPUR', 'UDAIPUR', 'KOTA', 'SILIGURI', 'DURGAPUR', 'WARANGAL',
-        'GUNTUR', 'VIJAYAWADA', 'CHENGALPATTU', 'KANCHEEPURAM', 'SANGAREDDY',
-        'MEDCHAL', 'SUNGUVARCHATIRAM', 'SRI CITY'
+        'KOLKATA', 'AHMEDABAD', 'SURAT', 'JAIPUR', 'LUCKNOW', 'KANPUR', 'NAGPUR', 'VISAKHAPATNAM', 'INDORE', 'THANE', 'BHOPAL', 'PATNA', 'VADODARA', 'GHAZIABAD', 'LUDHIANA', 'AGRA', 'NASHIK', 'COIMBATORE', 'MADURAI', 'VARANASI', 'MEERUT', 'FARIDABAD', 'RAJKOT', 'NOIDA', 'GURGAON', 'GURUGRAM', 'KOCHI', 'COCHIN', 'THIRUVANANTHAPURAM', 'TRIVANDRUM', 'MANGALORE', 'MANGALURU', 'MYSORE', 'MYSURU', 'SALEM', 'TIRUPUR', 'TIRUPPUR', 'HOSUR', 'ERODE', 'VELLORE', 'TUTICORIN', 'THOOTHUKUDI', 'PONDICHERRY', 'PUDUCHERRY', 'NAVI MUMBAI', 'BARODA', 'CHANDIGARH', 'JAMSHEDPUR', 'RANCHI', 'RAIPUR', 'BHUBANESWAR', 'GUWAHATI', 'DEHRADUN', 'JODHPUR', 'UDAIPUR', 'KOTA', 'SILIGURI', 'DURGAPUR', 'WARANGAL', 'GUNTUR', 'VIJAYAWADA', 'CHENGALPATTU', 'SANGAREDDY', 'MEDCHAL', 'SUNGUVARCHATIRAM', 'SRI CITY'
     ];
 
     for (var c = 0; c < cities.length; c++) {
-        if (addressText.indexOf(cities[c]) !== -1) {
+        if (text.indexOf(cities[c]) !== -1) {
             return cities[c];
         }
     }
 
-    // Try to detect from state mention
     var states = {
         'KARNATAKA': 'BANGALORE', 'TAMIL NADU': 'CHENNAI', 'TAMILNADU': 'CHENNAI',
         'MAHARASHTRA': 'MUMBAI', 'TELANGANA': 'HYDERABAD', 'ANDHRA PRADESH': 'SRI CITY'
     };
     for (var state in states) {
-        if (addressText.indexOf(state) !== -1) {
+        if (text.indexOf(state) !== -1) {
             return states[state];
         }
     }
@@ -610,21 +633,17 @@ function extractCity(addressText) {
 }
 
 function backfillLineNumbers(entries, allLines) {
-    // Scan the full text to find "Line No : XXX" entries and assign to subsequent sublines.
-    // Always overwrite lineNo since the sequential scan is more reliable than inline parsing.
     var currentLineNo = '';
     var sublineIndex = 0;
 
     for (var i = 0; i < allLines.length; i++) {
         var line = allLines[i].trim();
-        // Only match "Line No : 320" - exclude "Subline No" by checking the line doesn't contain "Sub"
-        var m = line.match(/Line\s*No\s*:\s*(\d+)/i);
+        var m = line.match(/Line\s*No\.?\s*:\s*(\d+)/i);
         if (m && !line.match(/Sub\s*line/i)) {
             currentLineNo = m[1];
         }
-        var s = line.match(/Sub\s*line\s*No\s*:\s*(\d+)/i);
+        var s = line.match(/Sub\s*line\s*No\.?\s*:\s*(\d+)/i);
         if (s && sublineIndex < entries.length) {
-            // Always assign the current line number
             entries[sublineIndex].lineNo = currentLineNo;
             sublineIndex++;
         }
@@ -878,24 +897,26 @@ function generatePrintReport() {
 
         var pageTop = isFirstPage ? headerAndInfoHtml : ('<div style="text-align: right; font-weight: bold; font-size: 10pt; margin-bottom: 15px; padding-right: 5mm;">Page-' + (pageIndex + 1) + '</div>');
 
-        var sigImgHtml = '';
-        var sigPad = document.getElementById('signaturePad');
-        if (sigPad && !isCanvasBlank(sigPad)) {
-            sigImgHtml = '<img src="' + sigPad.toDataURL('image/png') + '" style="height: 50px; display: block; margin-left: auto; margin-bottom: 2px;"/>';
-        }
+        var sealImgHtml = '<img src="' + cleanSealBase64 + '" style="height: 75px; width: auto; display: block; margin-left: auto; margin-bottom: 2px;" />';
 
         var footerHtml = isLastPage ? (
-            '<div style="page-break-inside: avoid;">' +
-                '<div class="report-footer" style="margin-top: 20px; font-size: 8pt; text-align: left; padding: 0 5mm;">' +
-                    '<p style="margin:4px 0;">CONTAINER FLOOR BOARD ON GOUGED AT PLACES.</p>' +
-                    '<p style="margin:4px 0;">Issued without Prejudice</p>' +
-                    '<p style="margin:5px 0; max-width: 80%; line-height: 1.4;">This report is made on the basis of our inspection to the best of our skill and knowledge and as per findings at the time and place of inspection and the report is issued subject to the condition that neither firm nor any of its Surveyors agents is under any circumstances to be held responsible for any inaccuracy in report or for Certificate issued for or any error of Judgment, default or negligence.</p>' +
-                '</div>' +
-                '<div style="text-align: right; margin-top: 5px; font-size: 9pt; font-weight: bold; padding-right: 5mm;">' +
-                    sigImgHtml +
-                    'SURVEYORS' +
-                '</div>' +
-            '</div>'
+            '<table style="width: 100%; border: none; margin-top: 20px; page-break-inside: avoid; border-collapse: collapse;">' +
+                '<tr style="border: none;">' +
+                    '<td style="width: 65%; text-align: left; vertical-align: bottom; border: none; padding: 0;">' +
+                        '<div class="report-footer" style="font-size: 8pt; line-height: 1.4; padding-right: 10px;">' +
+                            '<p style="margin: 2px 0; font-weight: bold; font-size: 8.5pt;">CONTAINER FLOOR BOARD ON GOUGED AT PLACES.</p>' +
+                            '<p style="margin: 2px 0;">Issued without Prejudice</p>' +
+                            '<p style="margin: 4px 0; text-align: justify;">This report is made on the basis of our inspection to the best of our skill and knowledge and as per findings at the time and place of inspection and the report is issued subject to the condition that neither firm nor any of its Surveyors agents is under any circumstances to be held responsible for any inaccuracy in report or for Certificate issued for or any error of Judgment, default or negligence.</p>' +
+                        '</div>' +
+                    '</td>' +
+                    '<td style="width: 35%; text-align: right; vertical-align: bottom; border: none; padding: 0;">' +
+                        '<div style="display: inline-block; text-align: right;">' +
+                            sealImgHtml +
+                            '<span style="font-size: 9pt; font-weight: bold; display: block; padding-right: 5px; letter-spacing: 0.5px;">SURVEYORS</span>' +
+                        '</div>' +
+                    '</td>' +
+                '</tr>' +
+            '</table>'
         ) : '';
         
         var pageStyle = 'page-break-after: always;' + (isFirstPage ? '' : ' padding-top: 15mm; padding-right: 5mm; padding-left: 5mm;');
@@ -907,69 +928,283 @@ function generatePrintReport() {
     printTemplate.innerHTML = pagesHtml;
 }
 
-// --- Signature Pad Logic ---
-var signaturePad = document.getElementById('signaturePad');
-var sigCtx = signaturePad ? signaturePad.getContext('2d') : null;
-var isDrawing = false;
-var lastX = 0;
-var lastY = 0;
+// --- Signature Pad removed - using fixed seal+signature image instead ---
 
-function getCoordinates(e) {
-    var rect = signaturePad.getBoundingClientRect();
-    if (e.touches && e.touches.length > 0) {
-        return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+// ===== OCR Manifest Parser =====
+function parseOCRManifestText(fullText) {
+    // Company Detection - same logic as text parser
+    // CARGO CONSOLIDATORS manifests have "CARGO CONSOLIDATORS" in header, "ECCT" in CFS code, or "cargoconsol" email
+    // ALLTRANS manifests have generic "SEA CONSOL IGM PRINT" header with NO company name
+    var isCARGO = fullText.match(/CARGO\s*CONSOLIDATORS/i) || fullText.match(/ECCT/i) || fullText.match(/cargoconsol/i);
+    var companyPrefix = isCARGO ? 'CCIPL' : 'ATSLL';
+    
+    console.log('--- OCR COMPANY DETECTION ---');
+    console.log('Found CARGO CONSOLIDATORS:', !!fullText.match(/CARGO\s*CONSOLIDATORS/i));
+    console.log('Found ECCT:', !!fullText.match(/ECCT/i));
+    console.log('Found cargoconsol:', !!fullText.match(/cargoconsol/i));
+    console.log('Detected company:', isCARGO ? 'CARGO CONSOLIDATORS' : 'ALLTRANS');
+    
+    var reportNum = getNextReportNumber() || '001';
+    extractedData.reportNo = 'SSMS/' + companyPrefix + '/' + reportNum + '/2026';
+    
+    if (isCARGO) {
+        extractedData.location = 'ECCT CFS';
+        extractedData.ac = 'CARGO CONSOLIDATORS INDIA PVT LTD';
+    } else {
+        extractedData.location = 'SATTVA 2 CFS';
+        extractedData.ac = 'ALLTRANS SHIPPING AND LOGISTICS LL';
     }
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-}
+    
+    extractedData.port = 'CHENNAI';
+    extractedData.sealNo = '';
+    
+    var allLines = fullText.split('\n');
+    
+    // Reset data
+    var vessel = '';
+    var voyage = '';
+    var containerNo = '';
+    var sealNo = '';
+    extractedData.containerNo = '';
+    extractedData.auxCode = '';
+    var isoCode = '';
+    
+    for (var i = 0; i < allLines.length; i++) {
+        var line = allLines[i].trim();
+        
+        var vMatch = line.match(/Voyage\s*No\.?\s*:\s*(\S+)\s*Vessel\s*:\s*(.*)/i);
+        if (vMatch && !vessel) {
+            voyage = vMatch[1].trim();
+            vessel = vMatch[2].trim();
+        }
+        
+        var cMatch = line.match(/^([A-Z]{4}\d{7})\s+(?:LCL|FCL)\s+(\S+)\s+\S+\s+[\d\.]+\s+\d+\s+(\d{4})/i);
+        if (cMatch && !containerNo) {
+            containerNo = cMatch[1];
+            sealNo = cMatch[2];
+            isoCode = cMatch[3];
+        }
+    }
+    
+    extractedData.vessel = (vessel && voyage) ? (vessel + '/' + voyage) : (vessel || voyage || '');
+    extractedData.containerNo = containerNo;
+    extractedData.sealNo = sealNo;
+    
+    if (isoCode === '4500' || isoCode === '4400' || isoCode === '45G0' || isoCode === '45G1') {
+        extractedData.auxCode = '45G1 (40 HC)';
+    } else if (isoCode === '2200' || isoCode === '22G0' || isoCode === '22G1') {
+        extractedData.auxCode = '22G1 (20GP)';
+    } else {
+        extractedData.auxCode = isoCode || '';
+    }
+    
+    // Report number already set above with correct company prefix - don't overwrite
+    
+    var entries = [];
+    var currentEntry = null;
+    
+    var collectingDesc = false;
+    var descBuf = [];
+    var collectingMarks = false;
+    var marksBuf = [];
+    var collectingImporter = false;
+    var importerBuf = [];
+    
+    for (var i = 0; i < allLines.length; i++) {
+        var line = allLines[i].trim();
+        if (!line) continue;
+        
+        var lineNoMatch = line.match(/^\s*Line\s*No\.?\s*:\s*(\d+)/i);
+        if (lineNoMatch) continue;
+        
+        var sublineMatch = line.match(/Subline\s*No\.?\s*:\s*(\d+)\s*HBL\s*Number\s*:\s*(\S+)\s*HBL\s*Date\s*:\s*(\S+)/i);
+        if (!sublineMatch) sublineMatch = line.match(/Subline\s*No\.?\s*:\s*(\d+)/i);
+        
+        if (sublineMatch) {
+            if (currentEntry) {
+                flushOCREntry(currentEntry, descBuf, marksBuf, importerBuf);
+                entries.push(currentEntry);
+            }
+            
+            var hblNum = (sublineMatch[2] || '').trim();
+            var hblDate = (sublineMatch[3] || '').trim();
+            if (!hblNum) {
+                var hm = line.match(/HBL\s*Number\s*:\s*(\S+)/i);
+                if (hm) hblNum = hm[1];
+            }
+            if (!hblDate) {
+                var dm = line.match(/HBL\s*Date\s*:\s*(\S+)/i);
+                if (dm) hblDate = dm[1];
+            }
+            
+            var sNo = sublineMatch[1].replace(/"/g, '1').replace(/'/g, '1');
+            if (line.match(/Subline\s*No\.?\s*:\s*\d+["']/i)) {
+                // if it ended with quote, it's a typo for 1
+                sNo = sNo + '1';
+            }
+            
+            currentEntry = {
+                sublineNo: sNo,
+                lineNo: '',
+                hblNumber: hblNum,
+                hblDate: hblDate,
+                totalPackages: '0',
+                grossWeight: '0.000',
+                commodityDesc: '',
+                marks: '',
+                importerName: ''
+            };
+            
+            descBuf = [];
+            marksBuf = [];
+            importerBuf = [];
+            collectingDesc = false;
+            collectingMarks = false;
+            collectingImporter = false;
+            continue;
+        }
+        
+        if (!currentEntry) continue;
+        
+        var pkgMatch = line.match(/Total\s*Package[s]?\s*:\s*(\d+)/i);
+        if (pkgMatch) currentEntry.totalPackages = pkgMatch[1];
+        
+        var wtMatch = line.match(/Gross\s*Weight\s*:\s*([\d\.]+)/i);
+        if (wtMatch) currentEntry.grossWeight = wtMatch[1];
+        
+        if (line.match(/Goods\s*Desc\s*:/i)) {
+            collectingDesc = true;
+            collectingMarks = false;
+            collectingImporter = false;
+            var descPart = line.replace(/Goods\s*Desc\s*:/i, '').trim();
+            if (descPart) descBuf.push(descPart);
+            continue;
+        }
+        
+        if (line.match(/Marks\s*:/i)) {
+            collectingDesc = false;
+            collectingMarks = true;
+            collectingImporter = false;
+            var markPart = line.replace(/Marks\s*:/i, '').trim();
+            if (markPart) marksBuf.push(markPart);
+            continue;
+        }
+        
+        if (line.match(/Importer's\s*Name/i) || line.match(/Consignee's\s*Name/i)) {
+            collectingDesc = false;
+            collectingMarks = false;
+            collectingImporter = true;
+            continue;
+        }
+        
+        if (line.match(/Container\s*No\.?\s*Cont\s*Status/i) || line.match(/^FFAU\d+/)) {
+            collectingImporter = false;
+            continue;
+        }
+        
+        if (collectingDesc) {
+            if (line.match(/Marks\s*:/i) || line.match(/Importer/i)) { collectingDesc = false; }
+            else { descBuf.push(line); continue; }
+        }
+        if (collectingMarks) {
+            if (line.match(/Importer/i) || line.match(/Container/i)) { collectingMarks = false; }
+            else { marksBuf.push(line); continue; }
+        }
+        if (collectingImporter) {
+            if (line.match(/Container/i) || line.match(/Line\s*No/i)) { collectingImporter = false; }
+            else { importerBuf.push(line); continue; }
+        }
+    }
+    
+    if (currentEntry) {
+        flushOCREntry(currentEntry, descBuf, marksBuf, importerBuf);
+        entries.push(currentEntry);
+    }
+    
+    var currentLineNo = '';
+    var sublineIndex = 0;
+    for (var i = 0; i < allLines.length; i++) {
+        var line = allLines[i].trim();
+        var m = line.match(/^\s*Line\s*No\.?\s*:\s*(\d+)/i);
+        if (m) currentLineNo = m[1];
+        
+        var s = line.match(/Subline\s*No\.?\s*:\s*(\d+)/i);
+        if (s && sublineIndex < entries.length) {
+            entries[sublineIndex].lineNo = currentLineNo;
+            sublineIndex++;
+        }
+    }
+    
+    extractedData.rows = entries.map(function (entry, index) {
+        var lno = (entry.lineNo && entry.sublineNo) ? (entry.lineNo + '-' + entry.sublineNo) : (entry.lineNo || entry.sublineNo || '');
+        var hbl = '';
+        if (entry.hblNumber && entry.hblDate) hbl = entry.hblNumber + ' ' + entry.hblDate;
+        else if (entry.hblNumber) hbl = entry.hblNumber;
+        
+        var weightVal = parseFloat(entry.grossWeight) || 0;
+        
+        var marks = entry.marks || '';
+        marks = marks.replace(/\bAS\s+PER\s+BL\b/gi, '').trim();
+        marks = marks.replace(/\bC\/(?:NO|O)\.?\s*\d+\b/gi, '').trim();
 
-function startDrawing(e) {
-    isDrawing = true;
-    var coords = getCoordinates(e);
-    lastX = coords.x;
-    lastY = coords.y;
-    e.preventDefault(); // Prevent scrolling on touch
-}
-
-function draw(e) {
-    if (!isDrawing) return;
-    var coords = getCoordinates(e);
-    sigCtx.beginPath();
-    sigCtx.moveTo(lastX, lastY);
-    sigCtx.lineTo(coords.x, coords.y);
-    sigCtx.strokeStyle = '#000000';
-    sigCtx.lineWidth = 2;
-    sigCtx.lineCap = 'round';
-    sigCtx.stroke();
-    lastX = coords.x;
-    lastY = coords.y;
-    e.preventDefault();
-}
-
-function stopDrawing() {
-    isDrawing = false;
-}
-
-if (signaturePad) {
-    // Mouse events
-    signaturePad.addEventListener('mousedown', startDrawing);
-    signaturePad.addEventListener('mousemove', draw);
-    signaturePad.addEventListener('mouseup', stopDrawing);
-    signaturePad.addEventListener('mouseout', stopDrawing);
-
-    // Touch events for mobile
-    signaturePad.addEventListener('touchstart', startDrawing, {passive: false});
-    signaturePad.addEventListener('touchmove', draw, {passive: false});
-    signaturePad.addEventListener('touchend', stopDrawing);
-
-    document.getElementById('clearSignatureBtn').addEventListener('click', function(e) {
-        e.preventDefault();
-        sigCtx.clearRect(0, 0, signaturePad.width, signaturePad.height);
+        var desc = entry.commodityDesc || '';
+        desc = desc.replace(/\bAS\s+PER\s+BL\b/gi, '').trim();
+        desc = desc.replace(/\bHS\s*CODE\b.*$/gi, '').trim();
+        
+        return {
+            sno: index + 1,
+            lno: lno,
+            marks: marks,
+            hbl: hbl,
+            importerName: entry.importerName || '',
+            description: desc,
+            pkgs: entry.totalPackages || '',
+            weight: weightVal.toFixed(3),
+            remarks: 'APPARENT SOUND CONDITIONS'
+        };
     });
+    
+    document.getElementById('editVessel').value = extractedData.vessel;
+    document.getElementById('editReportNo').value = extractedData.reportNo;
+    document.getElementById('editContainer').value = extractedData.containerNo;
+    document.getElementById('editAuxCode').value = extractedData.auxCode;
+    document.getElementById('editLocation').value = extractedData.location;
+    document.getElementById('editPort').value = extractedData.port;
+    document.getElementById('editSealNo').value = extractedData.sealNo;
+    document.getElementById('editAC').value = extractedData.ac;
 }
 
-function isCanvasBlank(canvas) {
-    var blank = document.createElement('canvas');
-    blank.width = canvas.width;
-    blank.height = canvas.height;
-    return canvas.toDataURL() === blank.toDataURL();
+function flushOCREntry(entry, descBuf, marksBuf, importerBuf) {
+    if (descBuf.length > 0) {
+        var desc = descBuf.join(' ').replace(/\s+/g, ' ').trim().toUpperCase();
+        desc = desc.replace(/\bAS\s+PER\s+BL\b/gi, '').trim();
+        entry.commodityDesc = desc;
+    }
+    
+    if (marksBuf.length > 0) {
+        var marks = marksBuf.join(' ').replace(/\s+/g, ' ').trim().toUpperCase();
+        marks = marks.replace(/\bAS\s+PER\s+BL\b/gi, '').trim();
+        entry.marks = marks;
+    }
+    
+    if (importerBuf.length > 0) {
+        var addressParts = [];
+        var companyName = extractLeftHalf(importerBuf[0].trim().toUpperCase());
+        for (var k = 1; k < importerBuf.length; k++) {
+            var leftHalf = extractLeftHalf(importerBuf[k].trim().toUpperCase());
+            leftHalf = leftHalf.replace(/\|\s*P\s*LTD/g, 'PVT LTD').replace(/\|\s*PVT\s*LTD/g, 'PVT LTD').replace(/\|\s*/g, '');
+            if (leftHalf) addressParts.push(leftHalf);
+        }
+        
+        companyName = companyName.replace(/\|\s*P\s*LTD/g, 'PVT LTD').replace(/\|\s*PVT\s*LTD/g, 'PVT LTD').replace(/\|\s*/g, '');
+        
+        var fullAddress = addressParts.join(' ');
+        var city = extractCity(fullAddress);
+        
+        if (city) {
+            entry.importerName = companyName + ', ' + city;
+        } else {
+            entry.importerName = companyName;
+        }
+    }
 }

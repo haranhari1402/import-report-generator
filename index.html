@@ -146,15 +146,6 @@
                                     <input type="text" id="dateShiftInput" placeholder="e.g. 15-MAR-2026 / Day"
                                         class="w-full px-3 py-2 rounded-lg bg-surface-800 border border-surface-700 text-surface-200 text-sm font-sans focus:ring-2 focus:ring-brand-500/50 focus:border-brand-500 transition-all outline-none placeholder:text-surface-600">
                                 </div>
-                                <div>
-                                    <label class="block text-xs font-medium text-surface-400 mb-1.5 flex justify-between items-center">
-                                        <span>Surveyor Signature</span>
-                                        <button id="clearSignatureBtn" class="text-brand-400 hover:text-brand-300 text-[10px] uppercase font-bold tracking-wider">Clear</button>
-                                    </label>
-                                    <div class="rounded-lg border border-surface-700 bg-surface-800 overflow-hidden">
-                                        <canvas id="signaturePad" width="280" height="100" class="w-full bg-white touch-none cursor-crosshair"></canvas>
-                                    </div>
-                                </div>
                                 <button id="saveSettingsBtn" class="w-full px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-sm font-medium transition-all duration-200 hover:shadow-lg hover:shadow-brand-500/25">
                                     Save Settings
                                 </button>
@@ -169,7 +160,7 @@
                 <div class="rounded-2xl border border-surface-800/50 bg-surface-900/50 backdrop-blur-sm p-8 text-center">
                     <div class="inline-flex items-center gap-3">
                         <div class="animate-spin w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full"></div>
-                        <span class="text-surface-300 text-sm">Parsing manifest PDF...</span>
+                        <span id="loadingStatus" class="text-surface-300 text-sm">Parsing manifest PDF...</span>
                     </div>
                 </div>
             </div>
@@ -284,6 +275,10 @@
     <script>
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
     </script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script>
+    </script>
+    <script src="seal.js"></script>
     <script src="app.js"></script>
 </body>
 </html>
